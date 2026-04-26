@@ -1,89 +1,90 @@
 import streamlit as st
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
 import os
-from rag_logic import LocalRAG
 
-# 1. Page Configuration & Stealth UI Styling
-st.set_page_config(page_title="IntelRAG Service", layout="wide")
+# --- Page Config ---
+st.set_page_config(page_title="Enterprise RAG Engine", page_icon="🧠", layout="wide")
 
-# Custom CSS for the Monochrome / Dark Mode aesthetic
+# --- Custom Stealth CSS ---
 st.markdown("""
     <style>
-    .main { background-color: #000000; color: #ffffff; }
-    .stButton>button { 
-        background-color: #ffffff; color: #000000; 
-        border-radius: 0px; font-weight: bold; width: 100%; 
-    }
-    .stTextInput>div>div>input { background-color: #111111; color: #ffffff; border: 1px solid #333; }
-    .stChatMessage { background-color: #111111; border-radius: 0px; border-left: 3px solid #ffffff; }
-    h1, h2, h3 { color: #ffffff; font-family: 'Courier New', Courier, monospace; }
-    .stSidebar { background-color: #050505; border-right: 1px solid #222; }
+        .stApp { background-color: #0d1117; color: #c9d1d9; }
+        .stSidebar { background-color: #161b22; }
+        h1, h2, h3 { color: #58a6ff !important; }
+        .stChatInputContainer { padding-bottom: 20px; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# 2. Initialize the Backend Engine
-@st.cache_resource
-def get_rag_engine():
-    return LocalRAG()
+st.title("Enterprise RAG Engine (Cloud Demo)")
+st.caption("Upload a secure document to instantly vectorize it and query its contents using Retrieval-Augmented Generation.")
 
-rag = get_rag_engine()
-
-# 3. Sidebar: Ingestion Management
+# --- Sidebar: Document Upload ---
 with st.sidebar:
-    st.title("📂 INTEL_CORE")
-    st.write("---")
-    uploaded_file = st.file_uploader("UPLOAD TECHNICAL DOCUMENT (PDF)", type="pdf")
+    st.header("1. Secure Upload")
+    pdf_docs = st.file_uploader("Upload PDF Documents", accept_multiple_files=True, type=['pdf'])
     
-    if uploaded_file:
-        # Save file temporarily to disk for processing
-        if not os.path.exists("temp"):
-            os.makedirs("temp")
-        
-        file_path = os.path.join("temp", uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        with st.spinner("VECTORIZING KNOWLEDGE..."):
-            rag.ingest_pdf(file_path)
-            st.success("INGESTION COMPLETE")
+    # Notice: The API key input box has been completely removed!
     
-    st.write("---")
-    if st.button("CLEAR VECTOR STORAGE"):
-        # Logic to clear ChromaDB if needed
-        st.warning("Database reset requested.")
+    if st.button("Process & Vectorize"):
+        if not pdf_docs:
+            st.error("Please upload a PDF document.")
+        else:
+            with st.spinner("Chunking text and generating vectors..."):
+                # 1. Extract Text
+                raw_text = ""
+                for pdf in pdf_docs:
+                    pdf_reader = PdfReader(pdf)
+                    for page in pdf_reader.pages:
+                        raw_text += page.extract_text()
+                
+                # 2. Chunk Text
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                text_chunks = text_splitter.split_text(raw_text)
+                
+                # 3. Create Vector Store
+                embeddings = OpenAIEmbeddings()
+                vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+                
+                # 4. Create Conversation Chain
+                llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
+                memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+                st.session_state.conversation = ConversationalRetrievalChain.from_llm(
+                    llm=llm,
+                    retriever=vectorstore.as_retriever(),
+                    memory=memory
+                )
+                st.success("Vectorization Complete. Engine Ready.")
 
-# 4. Main Chat Interface
-st.title("💬 LOCAL INTEL RAG")
-st.subheader("Autonomous Knowledge Retrieval Engine")
-st.write("---")
+# --- Main Area: Chat Interface ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = None
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Display previous messages
+if st.session_state.chat_history:
+    for message in st.session_state.chat_history:
+        role = "user" if message.type == "human" else "assistant"
+        with st.chat_message(role):
+            st.markdown(message.content)
 
-# Display chat messages from history on app rerun
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# React to user input
-if prompt := st.chat_input("Input query..."):
-    # Display user message in chat message container
-    st.chat_message("user").markdown(prompt)
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    with st.chat_message("assistant"):
-        with st.spinner("QUERYING LOCAL INTELLIGENCE..."):
-            # Call our RAG backend
-            answer, sources = rag.query(prompt)
+# Chat Input box at the bottom
+if prompt := st.chat_input("Query the embedded document..."):
+    if "conversation" in st.session_state:
+        # Show user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Get AI response
+        with st.spinner("Retrieving context..."):
+            response = st.session_state.conversation({'question': prompt})
+            st.session_state.chat_history = response['chat_history']
             
-            # Display response
-            st.markdown(answer)
-            
-            # Display Citations (The "Source" Documents)
-            with st.expander("VIEW SOURCE CITATIONS"):
-                for doc in sources:
-                    st.write(f"- **Page {doc.metadata.get('page', 'N/A')}**: {doc.page_content[:200]}...")
-
-    # Add assistant response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+            # Show AI message
+            with st.chat_message("assistant"):
+                st.markdown(response['answer'])
+    else:
+        st.warning("Please upload a document and initialize the vectorizer first.")
